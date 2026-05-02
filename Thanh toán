@@ -17,8 +17,10 @@ const char* API_URL = "https://my.sepay.vn/userapi/transactions/list?limit=1";
 
 long tongSoDu = 0;              
 String maGiaoDichCuoi = "";     
-bool lanDauTien = true; 
-bool dangBiKetHang = false;        
+bool lanDauTien = true; // Biến trả về thông tin giao dịch API (để máy bán hàng khi khởi động không lấy giá trị API cũ tức là lần quét QR trước đó để sử dụng cho lần sau khi vừa khởi động lại máy)
+bool dangBiKetHang = false; // Biến nhớ trạng thái kẹt hàng        
+bool cuaDangMo = false; // Biến nhớ trạng thái cửa đang đóng hay mở
+
 unsigned long thoiGianCheckAPI = 0;
 const unsigned long CHU_KY_CHECK = 5000; 
 
@@ -154,7 +156,7 @@ bool nhaHang(String tenMon) {
   }
 
   if (r) {
-    dangBiKetHang = true;
+    dangBiKetHang = false;
     if(dsSoLuong[indexMon] > 0) dsSoLuong[indexMon]--; 
     mqtt.publish("Thanh_toan", "success");
     String msgOut = "out:" + tenMon; 
@@ -163,7 +165,7 @@ bool nhaHang(String tenMon) {
     chayChu("DA GIAO HANG THANH CONG! XIN CAM ON !!!", 1, 150);
     return true;
   } else {
-    dangBiKetHang = true;
+    dangBiKetHang = true; // Bị kẹt hàng
     mqtt.publish("Chon_mon", "JAM_DETECTED"); 
     bip(3, 300); 
     lcd.clear(); lcd.print("LOI: KET HANG!"); 
@@ -249,17 +251,23 @@ void loop() {
   if (!mqtt.connected()) reconnectMQTT();
   mqtt.loop();
 
+  if (coHuy || digitalRead(NUT_CANCEL) == LOW) {
+    bip(1, 200);
+    trangThai = CHAO_KHACH;
+    indexMon = 0;
+    indexPTTT = 0;
+    coHuy = false; // Trả lại cờ
+    lcd.clear(); 
+    lcd.setCursor(0, 0); lcd.print("  DA HUY LENH!  ");
+    delay(1000);
+    return; 
+  }
+
   kiemTraQuetThe();
 
   if (millis() - thoiGianCheckAPI >= CHU_KY_CHECK && trangThai != CHAO_KHACH) {
     kiemTraTienVe();
     thoiGianCheckAPI = millis();
-  }
-
-  if (coHuy) {
-    bip(1, 500);
-    trangThai = CHAO_KHACH;
-    coHuy = false;
   }
 
   switch (trangThai) {
@@ -362,25 +370,38 @@ void xulyNFC() {
     if (uid == danhSach[i].uid) {
       timThay = true;
 
+      // ==========================================
+      // XỬ LÝ NHÂN VIÊN BẢO TRÌ MÁY
+      // ==========================================
       if (danhSach[i].laNhanVien) {
          lcd.clear();
          bip(3, 100);
          
-         if (dangBiKetHang) {
-           // TRƯỜNG HỢP 1: ĐANG KẸT HÀNG -> CHỈ RESET LỖI
-           dangBiKetHang = false; 
-           lcd.setCursor(0, 0); lcd.print("DA FIX KET HANG!");
-           lcd.setCursor(0, 1); lcd.print("GIU NGUYEN KHO");
-           mqtt.publish("Thanh_toan", "STAFF_FIX_JAM");
-         } 
-         else { 
-           // TRƯỜNG HỢP 2: KHÔNG KẸT -> NẠP ĐẦY HÀNG
-           for(int j = 0; j < 4; j++) {
-             dsSoLuong[j] = 10;
+         cuaDangMo = !cuaDangMo;
+
+         if (cuaDangMo == true) {
+           // TRƯỜNG HỢP: MỞ CỬA RA
+           if (dangBiKetHang) {
+             // 1. ĐANG KẸT HÀNG -> CHỈ RESET LỖI
+             dangBiKetHang = false; 
+             lcd.setCursor(0, 0); lcd.print("DA FIX KET HANG!");
+             lcd.setCursor(0, 1); lcd.print("GIU NGUYEN KHO");
+             mqtt.publish("Thanh_toan", "STAFF_FIX_JAM");
+           } 
+           else { 
+             // 2. KHÔNG KẸT -> NẠP ĐẦY HÀNG
+             for(int j = 0; j < 4; j++) {
+               dsSoLuong[j] = 10;
+             }
+             lcd.setCursor(0, 0); lcd.print("CHAO " + danhSach[i].ten + "!");
+             lcd.setCursor(0, 1); lcd.print("DA NAP DAY HANG");
+             mqtt.publish("Thanh_toan", "STAFF_OPEN");
            }
-           lcd.setCursor(0, 0); lcd.print("CHAO " + danhSach[i].ten + "!");
-           lcd.setCursor(0, 1); lcd.print("DA NAP DAY HANG");
-           mqtt.publish("Thanh_toan", "STAFF_OPEN");
+         } 
+         else {
+           // TRƯỜNG HỢP: ĐÓNG CỬA LẠI
+           lcd.setCursor(0, 0); lcd.print("  DA KHOA TU!   ");
+           lcd.setCursor(0, 1); lcd.print("  TAM BIET...   ");
          }
          
          giaoTiepESP2.println("MO_CUA");
@@ -389,6 +410,9 @@ void xulyNFC() {
          return;
       }
 
+      // ==========================================
+      // XỬ LÝ KHÁCH QUÉT THẺ MUA HÀNG
+      // ==========================================
       if (trangThai == DANG_THANH_TOAN && indexPTTT == 0) {
         lcd.clear(); lcd.setCursor(0, 0); lcd.print("CHAO " + danhSach[i].ten + "!");
         if (danhSach[i].tienTk >= dsGia[indexMon]) {
@@ -399,7 +423,7 @@ void xulyNFC() {
           if (nhaHang(dsMon[indexMon])) {
              trangThai = CHAO_KHACH; 
           } else {
-             danhSach[i].tienTk += dsGia[indexMon]; // Hoàn tiền NFC
+             danhSach[i].tienTk += dsGia[indexMon]; // Hoàn tiền NFC nếu kẹt
              trangThai = CHAO_KHACH;
           }
         } else {
