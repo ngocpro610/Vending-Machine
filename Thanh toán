@@ -8,7 +8,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <SoftwareSerial.h> 
 #include <PubSubClient.h> 
-
+ 
 // --- 1. CẤU HÌNH MẠNG & API SEPAY ---
 const char* ssid = " ";
 const char* password = " ";
