@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hệ Thống Giám Sát Máy Bán Hàng - Admin</title>
+
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f4f7f6;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 30px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            text-align: center;
+        }
+        
+        /* Dashboard Cards */
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto 30px;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+            border-bottom: 5px solid #3498db;
+            transition: transform 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        .card h3 {
+            margin: 0;
+            font-size: 14px;
+            color: #7f8c8d;
+            text-transform: uppercase;
+        }
+        .card p {
+            font-size: 28px;
+            font-weight: bold;
+            margin: 10px 0 0;
+            color: #2c3e50;
+        }
+        .card.alert-card {
+            border-bottom-color: #e74c3c;
+        }
+        .card.staff-card {
+            border-bottom-color: #f1c40f;
+        }
+
+        /* Inventory Section */
+        .inventory-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .stock-item {
+            background: white;
+            padding: 20px;
+            border-radius: 15px;
+            display: flex;
+            align-items: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+        }
+        .stock-info {
+            flex-grow: 1;
+            text-align: left;
+            margin-left: 15px;
+        }
+        .stock-info h4 {
+            margin: 0;
+            color: #34495e;
+        }
+        .stock-bar {
+            height: 10px;
+            background: #ecf0f1;
+            border-radius: 5px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+        .progress {
+            height: 100%;
+            background: #27ae60;
+            transition: width 0.5s ease;
+        }
+
+        /* Log Table */
+        .log-section {
+            max-width: 1200px;
+            margin: 40px auto;
+            background: white;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        th {
+            background: #f8f9fa;
+            color: #2c3e50;
+        }
+        .status-tag {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            color: white;
+        }
+        .tag-sale {
+            background: #27ae60;
+        }
+        .tag-staff {
+            background: #f1c40f;
+        }
+        .tag-error {
+            background: #e74c3c;
+        }
+
+        #alert-box {
+            display: none;
+            background: #ff7675;
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 0 auto 20px;
+            max-width: 1170px;
+            font-weight: bold;
+            animation: blink 1s infinite;
+            text-align: center;
+        }
+        @keyframes blink {
+            0% {opacity: 1;}
+            50% {opacity: 0.7;}
+            100% {opacity: 1;}
+        }
+    </style>
+</head>
+<body>
+
+    <h1>📊 QUẢN LÝ MÁY BÁN HÀNG TỰ ĐỘNG</h1>
+    
+    <div id="alert-box">⚠️ CẢNH BÁO: PHÁT HIỆN KẸT HÀNG TẠI MÁY!</div>
+
+    <div class="dashboard">
+        <div class="card">
+            <h3>Doanh thu tổng</h3>
+            <p id="totalRevenue">0 đ</p>
+        </div>
+        <div class="card">
+            <h3>Tổng khách mua</h3>
+            <p id="customerCount">0</p>
+        </div>
+        <div class="card staff-card">
+            <h3>Lượt bảo trì</h3>
+            <p id="staffAccessCount">0</p>
+        </div>
+        <div class="card alert-card">
+            <h3>Trạng thái máy</h3>
+            <p id="systemStatus" style="color: #27ae60;">Ổn định</p>
+        </div>
+    </div>
+
+    <h2 style="max-width: 1200px; margin: 20px auto; text-align: left;">📦 Tình trạng kho hàng</h2>
+    <div class="inventory-container">
+        <div class="stock-item">
+            <div class="stock-info">
+                <h4>Coca Cola</h4>
+                <div class="stock-bar"><div id="bar-coca" class="progress" style="width: 100%;"></div></div>
+                <p id="stock-coca" style="font-size: 14px; margin-top: 5px;">Còn lại: 10</p>
+            </div>
+        </div>
+        <div class="stock-item">
+            <div class="stock-info">
+                <h4>Pepsi</h4>
+                <div class="stock-bar"><div id="bar-pepsi" class="progress" style="width: 100%;"></div></div>
+                <p id="stock-pepsi" style="font-size: 14px; margin-top: 5px;">Còn lại: 10</p>
+            </div>
+        </div>
+        <div class="stock-item">
+            <div class="stock-info">
+                <h4>Nước Suối</h4>
+                <div class="stock-bar"><div id="bar-water" class="progress" style="width: 100%;"></div></div>
+                <p id="stock-water" style="font-size: 14px; margin-top: 5px;">Còn lại: 10</p>
+            </div>
+        </div>
+        <div class="stock-item">
+            <div class="stock-info">
+                <h4>Sting đỏ</h4>
+                <div class="stock-bar"><div id="bar-sting" class="progress" style="width: 100%;"></div></div>
+                <p id="stock-sting" style="font-size: 14px; margin-top: 5px;">Còn lại: 10</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="log-section">
+        <h2 style="padding: 20px; margin: 0; border-bottom: 1px solid #eee;">Nhật ký hoạt động</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Thời gian</th>
+                    <th>Sự kiện</th>
+                    <th>Chi tiết</th>
+                    <th>Loại</th>
+                </tr>
+            </thead>
+            <tbody id="logTableBody">
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const client = mqtt.connect("wss://broker.emqx.io:8084/mqtt", {
+            clientId: "vending_admin_dashboard_" + Math.random().toString(16).substring(2, 8)
+        });
+
+        let revenue = 0;
+        let customers = 0;
+        let staffAccess = 0;
+        let stock = { coca: 10, pepsi: 10, water: 10, sting: 10 };
+        const maxStock = 10;
+        const prices = { coca: 10000, pepsi: 10000, water: 5000, sting: 10000 };
+
+        client.on("connect", () => {
+            console.log("Admin Dashboard đã kết nối!");
+            client.subscribe("Chon_mon"); 
+            client.subscribe("Thanh_toan");
+        });
+
+        client.on("message", (topic, message) => {
+            const msg = message.toString();
+
+            // 1. KHI CÓ XÁC NHẬN RỚT HÀNG THÀNH CÔNG TỪ ESP
+            if (topic === "Chon_mon" && msg.includes("out:")) { 
+                const item = msg.split(":")[1];
+                updateStockAndRevenue(item);
+            }
+            
+            // 2. KHI PHÁT HIỆN KẸT HÀNG (ESP GỬI JAM_DETECTED)
+            if (topic === "Chon_mon" && msg === "JAM_DETECTED") {
+                handleAlert(true, "Máy bị kẹt hàng! Tiền đã hoàn lại cho khách.");
+            }
+
+            // 3. XỬ LÝ KHI NHÂN VIÊN BẢO TRÌ QUÉT THẺ[cite: 4]
+            if (topic === "Thanh_toan") {
+                if (msg === "STAFF_FIX_JAM") {
+                    // TRƯỜNG HỢP CHỈ GỠ KẸT HÀNG (GIỮ NGUYÊN KHO)[cite: 4]
+                    staffAccess++;
+                    handleAlert(false); // Xóa báo lỗi
+                    addLogRow("Bảo trì", "Nhân viên đã gỡ kẹt hàng (Giữ nguyên kho)", "tag-staff");
+                    updateStats();
+                } else if (msg === "STAFF_OPEN") {
+                    // TRƯỜNG HỢP NẠP ĐẦY HÀNG (RESET VỀ 10 LON)[cite: 4]
+                    staffAccess++;
+                    handleAlert(false); // Reset luôn cả lỗi (đề phòng)
+                    stock = { coca: 10, pepsi: 10, water: 10, sting: 10 }; // Nạp đầy[cite: 4]
+                    ["coca", "pepsi", "water", "sting"].forEach(k => {
+                        document.getElementById(`stock-${k}`).innerText = "Còn lại: " + stock[k];
+                        document.getElementById(`bar-${k}`).style.width = "100%";
+                    });
+                    addLogRow("Bảo trì", "Nhân viên nạp đầy kho hàng (Mở tủ)", "tag-staff");
+                    updateStats();
+                }
+            }
+        });
+
+        function updateStockAndRevenue(name) {
+            let key = "";
+            if (name.includes("Coca")) key = "coca";
+            else if (name.includes("Pepsi")) key = "pepsi";
+            else if (name.includes("suối") || name.includes("Aqua")) key = "water";
+            else if (name.includes("Sting")) key = "sting";
+
+            if (key && stock[key] > 0) {
+                stock[key]--;
+                revenue += prices[key];
+                customers++; 
+                
+                document.getElementById(`stock-${key}`).innerText = "Còn lại: " + stock[key];
+                document.getElementById(`bar-${key}`).style.width = (stock[key] / maxStock * 100) + "%";
+                addLogRow("Thành công", "Khách mua rớt lon " + name, "tag-sale");
+                
+                if(stock[key] === 0) addLogRow("Hết hàng", "Món " + name + " đã hết!", "tag-error");
+            }
+            updateStats();
+        }
+
+        function handleAlert(isError, msg = "") {
+            const alertBox = document.getElementById("alert-box");
+            const statusText = document.getElementById("systemStatus");
+            if (isError) {
+                alertBox.style.display = "block";
+                alertBox.innerText = "⚠️ " + msg;
+                statusText.innerText = "Kẹt hàng";
+                statusText.style.color = "#e74c3c";
+                addLogRow("Lỗi hệ thống", msg, "tag-error");
+            } else {
+                alertBox.style.display = "none";
+                statusText.innerText = "Ổn định";
+                statusText.style.color = "#27ae60";
+            }
+        }
+
+        function addLogRow(event, detail, tagClass) {
+            const table = document.getElementById("logTableBody");
+            const time = new Date().toLocaleTimeString('vi-VN');
+            const row = `<tr>
+                            <td>${time}</td>
+                            <td>${event}</td>
+                            <td>${detail}</td>
+                            <td><span class="status-tag ${tagClass}">${event}</span></td>
+                         </tr>`;
+            table.insertAdjacentHTML('afterbegin', row);
+        }
+
+        function updateStats() {
+            document.getElementById("customerCount").innerText = customers;
+            document.getElementById("staffAccessCount").innerText = staffAccess;
+            document.getElementById("totalRevenue").innerText = revenue.toLocaleString('vi-VN') + " đ";
+        }
+    </script>
+</body>
+</html>
