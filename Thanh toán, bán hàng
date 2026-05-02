@@ -17,7 +17,8 @@ const char* API_URL = "https://my.sepay.vn/userapi/transactions/list?limit=1";
 
 long tongSoDu = 0;              
 String maGiaoDichCuoi = "";     
-bool lanDauTien = true;         
+bool lanDauTien = true; 
+bool dangBiKetHang = false;        
 unsigned long thoiGianCheckAPI = 0;
 const unsigned long CHU_KY_CHECK = 5000; 
 
@@ -28,16 +29,17 @@ const int mqtt_port = 1883;
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
-// --- 3. ĐỊNH NGHĨA CHÂN PHẦN CỨNG ---
+// --- 3. ĐỊNH NGHĨA CHÂN---
 #define SS_PIN    2   // D4
 #define RST_PIN   -1  // 3V3
 #define COI_PIN   15  // D8
-#define NUT_ITEM  3   // RX
-#define NUT_OK    16  // D0
-#define NUT_METHOD 1  // TX
-#define NUT_CANCEL 0  // D3
+#define NUT_DA_NANG 3 // Nút 1: Chân RX (Chọn món & Chọn PTTT)
+#define NUT_OK    16  // Nút 2: Chân D0 (Xác nhận)
+#define NUT_CANCEL 0  // Nút 3: Chân D3 (Hủy)
+#define IR_PIN    A0  // Cảm biến IR 
 
-SoftwareSerial giaoTiepESP2(-1, 10); 
+// Giao tiếp với ESP2: Dùng chân TX
+SoftwareSerial giaoTiepESP2(-1, 1); 
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -45,7 +47,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 // --- 4. DANH SÁCH THỨC UỐNG & KHO HÀNG ---
 String dsMon[] = {"Coca", "Pepsi", "Aqua", "Sting"};
 long dsGia[] = {10000, 10000, 5000, 10000};
-int dsSoLuong[] = {10, 10, 10, 10}; // KHO HÀNG
+int dsSoLuong[] = {10, 10, 10, 10}; 
 String dsPTTT[] = {"Quet the", "Quet ma QR"};
 
 int indexMon = 0;
@@ -66,7 +68,6 @@ static KhachHang danhSach[] = {
   {"6A 38 E9 00", "THO SUA MAY 2", 0, true}      
 };
 
-// --- TRẠNG THÁI MÁY ---
 enum State {CHAO_KHACH, CHON_MON, CHON_PTTT, DANG_THANH_TOAN};
 volatile State trangThai = CHAO_KHACH;
 volatile bool coHuy = false;
@@ -78,10 +79,9 @@ bool kiemTraQuetThe();
 void hienThiMon();
 void hienThiPTTT();
 void hienThiThanhToan();
-void nhaHang(String tenMon);
+bool nhaHang(String tenMon);
 void chayChu(String chuDai, int hang, int tocDo);
 
-// Còi báo hiệu
 void bip(int s, int t) {
   for (int i = 0; i < s; i++) {
     digitalWrite(COI_PIN, HIGH); delay(t);
@@ -113,13 +113,10 @@ void kiemTraTienVe() {
     if (httpCode == 200) {
       String payload = http.getString();
       JsonDocument doc;
-      DeserializationError error = deserializeJson(doc, payload);
-      
-      if (!error && doc["transactions"].size() > 0) {
+      if (!deserializeJson(doc, payload) && doc["transactions"].size() > 0) {
         JsonObject giaoDich = doc["transactions"][0];
         String idHienTai = giaoDich["id"].as<String>();
         long tienVao = giaoDich["amount_in"].as<long>();
-        
         if (lanDauTien) {
           maGiaoDichCuoi = idHienTai; 
           lanDauTien = false;
@@ -135,25 +132,44 @@ void kiemTraTienVe() {
   }
 }
 
-void nhaHang(String tenMon) {
-  // Trừ kho hàng đi 1
-  if(dsSoLuong[indexMon] > 0) {
-    dsSoLuong[indexMon]--; 
-  }
-
+bool nhaHang(String tenMon) {
   lcd.clear();
   lcd.setCursor(0, 0); lcd.print("DANG NHA HANG...");
   lcd.setCursor(0, 1); lcd.print("> " + tenMon);
   
   giaoTiepESP2.print("NHA_HANG:");
   giaoTiepESP2.println(indexMon);
-  
-  mqtt.publish("Thanh_toan", "success");
-  String msgOut = "out:" + tenMon; 
-  mqtt.publish("Chon_mon", msgOut.c_str());
 
-  bip(1, 500); 
-  chayChu("DA GIAO HANG THANH CONG! XIN CAM ON !!!", 1, 150);
+  unsigned long t = millis();
+  bool r = false;
+
+  // Tự quét cảm biến tại chân A0
+  while (millis() - t < 4500) {
+    if (analogRead(IR_PIN) < 500) { 
+      r = true;
+      break; 
+    }
+    delay(5);
+    mqtt.loop();
+  }
+
+  if (r) {
+    dangBiKetHang = true;
+    if(dsSoLuong[indexMon] > 0) dsSoLuong[indexMon]--; 
+    mqtt.publish("Thanh_toan", "success");
+    String msgOut = "out:" + tenMon; 
+    mqtt.publish("Chon_mon", msgOut.c_str());
+    bip(1, 500); 
+    chayChu("DA GIAO HANG THANH CONG! XIN CAM ON !!!", 1, 150);
+    return true;
+  } else {
+    dangBiKetHang = true;
+    mqtt.publish("Chon_mon", "JAM_DETECTED"); 
+    bip(3, 300); 
+    lcd.clear(); lcd.print("LOI: KET HANG!"); 
+    delay(3000);
+    return false;
+  }
 }
 
 void chayChu(String chuDai, int hang, int tocDo) {
@@ -187,10 +203,9 @@ void chayChuVoTan(String chuDai, int hang, int tocDo) {
 
     for (int i = 0; i <= chuChay.length() - 16; i++) {
       if (coHuy) return; 
-      
       if (kiemTraQuetThe()) return; 
 
-      if (digitalRead(NUT_ITEM) == LOW) {
+      if (digitalRead(NUT_DA_NANG) == LOW) {
         trangThai = CHON_MON;
         indexMon = 0;
         hienThiMon();
@@ -207,10 +222,9 @@ void chayChuVoTan(String chuDai, int hang, int tocDo) {
 void setup() {
   giaoTiepESP2.begin(9600); 
 
-  pinMode(NUT_ITEM, INPUT_PULLUP);
-  pinMode(NUT_OK, INPUT_PULLDOWN_16);
-  pinMode(NUT_METHOD, INPUT_PULLUP);
-  pinMode(NUT_CANCEL, INPUT_PULLUP);
+  pinMode(NUT_DA_NANG, INPUT_PULLUP); // Chân RX
+  pinMode(NUT_OK, INPUT_PULLDOWN_16); // Chân D0
+  pinMode(NUT_CANCEL, INPUT_PULLUP);  // Chân D3
   pinMode(COI_PIN, OUTPUT);
   digitalWrite(COI_PIN, LOW);
   
@@ -255,12 +269,11 @@ void loop() {
       break; 
 
     case CHON_MON:
-      if (digitalRead(NUT_ITEM) == LOW) {
+      if (digitalRead(NUT_DA_NANG) == LOW) {
         indexMon = (indexMon + 1) % 4;
         hienThiMon(); bip(1, 50); delay(400);
       }
       if (digitalRead(NUT_OK) == HIGH) {
-        // KIỂM TRA HÀNG TRONG KHO
         if (dsSoLuong[indexMon] <= 0) {
            bip(1, 1000);
            lcd.clear(); lcd.setCursor(0, 0); lcd.print("HET HANG !!!!");
@@ -275,7 +288,8 @@ void loop() {
       break;
 
     case CHON_PTTT:
-      if (digitalRead(NUT_METHOD) == LOW) {
+      // Dùng chung nút 1 (RX) để chọn PTTT
+      if (digitalRead(NUT_DA_NANG) == LOW) {
         indexPTTT = (indexPTTT + 1) % 2;
         hienThiPTTT(); bip(1, 50); delay(400);
       }
@@ -296,8 +310,12 @@ void loop() {
           lcd.setCursor(1, 1); lcd.print("THANH CONG !!!");
           bip(2, 100); delay(2000);
           
-          nhaHang(dsMon[indexMon]); 
-          trangThai = CHAO_KHACH;   
+          if (nhaHang(dsMon[indexMon])) {
+             trangThai = CHAO_KHACH;   
+          } else {
+             tongSoDu += dsGia[indexMon]; // Hoàn tiền nếu kẹt hàng
+             trangThai = CHAO_KHACH;
+          }
         }
       }
       break;
@@ -345,18 +363,28 @@ void xulyNFC() {
       timThay = true;
 
       if (danhSach[i].laNhanVien) {
-         lcd.clear(); lcd.setCursor(0, 0); lcd.print("CHAO " + danhSach[i].ten + "!");
+         lcd.clear();
          bip(3, 100);
-         lcd.setCursor(0, 1); lcd.print("DANG MO TU...");
          
-         giaoTiepESP2.println("MO_CUA");
-         
-         for(int j = 0; j < 4; j++) {
-           dsSoLuong[j] = 10;
+         if (dangBiKetHang) {
+           // TRƯỜNG HỢP 1: ĐANG KẸT HÀNG -> CHỈ RESET LỖI
+           dangBiKetHang = false; 
+           lcd.setCursor(0, 0); lcd.print("DA FIX KET HANG!");
+           lcd.setCursor(0, 1); lcd.print("GIU NGUYEN KHO");
+           mqtt.publish("Thanh_toan", "STAFF_FIX_JAM");
+         } 
+         else { 
+           // TRƯỜNG HỢP 2: KHÔNG KẸT -> NẠP ĐẦY HÀNG
+           for(int j = 0; j < 4; j++) {
+             dsSoLuong[j] = 10;
+           }
+           lcd.setCursor(0, 0); lcd.print("CHAO " + danhSach[i].ten + "!");
+           lcd.setCursor(0, 1); lcd.print("DA NAP DAY HANG");
+           mqtt.publish("Thanh_toan", "STAFF_OPEN");
          }
          
-         mqtt.publish("Thanh_toan", "STAFF_OPEN"); 
-         delay(2000);
+         giaoTiepESP2.println("MO_CUA");
+         delay(3000);
          trangThai = CHAO_KHACH; 
          return;
       }
@@ -368,8 +396,12 @@ void xulyNFC() {
           lcd.setCursor(0, 1); lcd.print("DANG TRU TIEN...");
           delay(1500); bip(2, 100);
           
-          nhaHang(dsMon[indexMon]); 
-          trangThai = CHAO_KHACH; 
+          if (nhaHang(dsMon[indexMon])) {
+             trangThai = CHAO_KHACH; 
+          } else {
+             danhSach[i].tienTk += dsGia[indexMon]; // Hoàn tiền NFC
+             trangThai = CHAO_KHACH;
+          }
         } else {
           bip(1, 1000); lcd.clear(); lcd.setCursor(0, 0); lcd.print("LOI GIAO DICH!");
           chayChu("TAI KHOAN KHONG DU TIEN !!", 1, 200);
