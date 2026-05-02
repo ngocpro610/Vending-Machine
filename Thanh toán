@@ -10,8 +10,8 @@
 #include <PubSubClient.h> 
 
 // --- 1. CẤU HÌNH MẠNG & API SEPAY ---
-const char* ssid = "ZHE";
-const char* password = "01202490563";
+const char* ssid = "";
+const char* password = "";
 const char* API_TOKEN = "Bearer FHPBKOLHVEXGKIFRTEBL1OST29AMUGFES4KCVM8ASDJC3YM4OKL9N6WP5ZRI0YQP"; 
 const char* API_URL = "https://my.sepay.vn/userapi/transactions/list?limit=1";
 
