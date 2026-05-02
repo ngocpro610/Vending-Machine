@@ -1,0 +1,390 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h> 
+#include <PubSubClient.h> 
+
+// --- 1. CẤU HÌNH MẠNG & API SEPAY ---
+const char* ssid = "ZHE";
+const char* password = "01202490563";
+const char* API_TOKEN = "Bearer FHPBKOLHVEXGKIFRTEBL1OST29AMUGFES4KCVM8ASDJC3YM4OKL9N6WP5ZRI0YQP"; 
+const char* API_URL = "https://my.sepay.vn/userapi/transactions/list?limit=1";
+
+long tongSoDu = 0;              
+String maGiaoDichCuoi = "";     
+bool lanDauTien = true;         
+unsigned long thoiGianCheckAPI = 0;
+const unsigned long CHU_KY_CHECK = 5000; 
+
+// --- 2. CẤU HÌNH MQTT ---
+const char* mqtt_server = "broker.emqx.io";
+const int mqtt_port = 1883;
+
+WiFiClient espClient;
+PubSubClient mqtt(espClient);
+
+// --- 3. ĐỊNH NGHĨA CHÂN PHẦN CỨNG ---
+#define SS_PIN    2   // D4
+#define RST_PIN   -1  // 3V3
+#define COI_PIN   15  // D8
+#define NUT_ITEM  3   // RX
+#define NUT_OK    16  // D0
+#define NUT_METHOD 1  // TX
+#define NUT_CANCEL 0  // D3
+
+SoftwareSerial giaoTiepESP2(-1, 10); 
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// --- 4. DANH SÁCH THỨC UỐNG & KHO HÀNG ---
+String dsMon[] = {"Coca", "Pepsi", "Aqua", "Sting"};
+long dsGia[] = {10000, 10000, 5000, 10000};
+int dsSoLuong[] = {10, 10, 10, 10}; // KHO HÀNG
+String dsPTTT[] = {"Quet the", "Quet ma QR"};
+
+int indexMon = 0;
+int indexPTTT = 0;
+
+// --- 5. DANH SÁCH TÀI KHOẢN NFC ---
+struct KhachHang {
+  String uid;
+  String ten;
+  long tienTk;
+  bool laNhanVien;
+};
+
+static KhachHang danhSach[] = {
+  {"F6 2B 0F 05", "KHACH VIP 1", 500000, false}, 
+  {"F6 37 CB 06", "KHACH VIP 2", 500000, false}, 
+  {"43 36 69 06", "THO SUA MAY 1", 0, true},     
+  {"6A 38 E9 00", "THO SUA MAY 2", 0, true}      
+};
+
+// --- TRẠNG THÁI MÁY ---
+enum State {CHAO_KHACH, CHON_MON, CHON_PTTT, DANG_THANH_TOAN};
+volatile State trangThai = CHAO_KHACH;
+volatile bool coHuy = false;
+
+void ICACHE_RAM_ATTR ngatHuy() { coHuy = true; }
+
+void xulyNFC();
+bool kiemTraQuetThe();
+void hienThiMon();
+void hienThiPTTT();
+void hienThiThanhToan();
+void nhaHang(String tenMon);
+void chayChu(String chuDai, int hang, int tocDo);
+
+// Còi báo hiệu
+void bip(int s, int t) {
+  for (int i = 0; i < s; i++) {
+    digitalWrite(COI_PIN, HIGH); delay(t);
+    digitalWrite(COI_PIN, LOW); delay(100);
+  }
+}
+
+void reconnectMQTT() {
+  while (!mqtt.connected() && WiFi.status() == WL_CONNECTED) {
+    String clientId = "VendingMachine_ESP1_" + String(random(0xffff), HEX);
+    if (mqtt.connect(clientId.c_str())) {
+      bip(1, 100);
+    } else {
+      delay(2000); 
+    }
+  }
+}
+
+void kiemTraTienVe() {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setInsecure(); 
+    HTTPClient http;
+    http.begin(client, API_URL);
+    http.addHeader("Authorization", API_TOKEN);
+    http.addHeader("Content-Type", "application/json"); 
+
+    int httpCode = http.GET();
+    if (httpCode == 200) {
+      String payload = http.getString();
+      JsonDocument doc;
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (!error && doc["transactions"].size() > 0) {
+        JsonObject giaoDich = doc["transactions"][0];
+        String idHienTai = giaoDich["id"].as<String>();
+        long tienVao = giaoDich["amount_in"].as<long>();
+        
+        if (lanDauTien) {
+          maGiaoDichCuoi = idHienTai; 
+          lanDauTien = false;
+        } 
+        else if (idHienTai != maGiaoDichCuoi && tienVao > 0) {
+          tongSoDu += tienVao; 
+          maGiaoDichCuoi = idHienTai; 
+          bip(3, 50); 
+        }
+      }
+    }
+    http.end();
+  }
+}
+
+void nhaHang(String tenMon) {
+  // Trừ kho hàng đi 1
+  if(dsSoLuong[indexMon] > 0) {
+    dsSoLuong[indexMon]--; 
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("DANG NHA HANG...");
+  lcd.setCursor(0, 1); lcd.print("> " + tenMon);
+  
+  giaoTiepESP2.print("NHA_HANG:");
+  giaoTiepESP2.println(indexMon);
+  
+  mqtt.publish("Thanh_toan", "success");
+  String msgOut = "out:" + tenMon; 
+  mqtt.publish("Chon_mon", msgOut.c_str());
+
+  bip(1, 500); 
+  chayChu("DA GIAO HANG THANH CONG! XIN CAM ON !!!", 1, 150);
+}
+
+void chayChu(String chuDai, int hang, int tocDo) {
+  String chuChay = "                " + chuDai + "                "; 
+  for (int i = 0; i <= chuChay.length() - 16; i++) {
+    if (coHuy) return; 
+    lcd.setCursor(0, hang);
+    lcd.print(chuChay.substring(i, i + 16));
+    delay(tocDo);
+  }
+}
+
+bool kiemTraQuetThe() {
+  if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+     xulyNFC();
+     mfrc522.PICC_HaltA();
+     return true;
+  }
+  return false;
+}
+
+void chayChuVoTan(String chuDai, int hang, int tocDo) {
+  String chuChay = "                " + chuDai + "                "; 
+  while (trangThai == CHAO_KHACH) {
+    if (millis() - thoiGianCheckAPI >= CHU_KY_CHECK) {
+      kiemTraTienVe();
+      thoiGianCheckAPI = millis();
+    }
+    if (!mqtt.connected()) reconnectMQTT();
+    mqtt.loop();
+
+    for (int i = 0; i <= chuChay.length() - 16; i++) {
+      if (coHuy) return; 
+      
+      if (kiemTraQuetThe()) return; 
+
+      if (digitalRead(NUT_ITEM) == LOW) {
+        trangThai = CHON_MON;
+        indexMon = 0;
+        hienThiMon();
+        bip(1, 50); delay(400);
+        return; 
+      }
+      lcd.setCursor(0, hang);
+      lcd.print(chuChay.substring(i, i + 16));
+      delay(tocDo); 
+    }
+  }
+}
+
+void setup() {
+  giaoTiepESP2.begin(9600); 
+
+  pinMode(NUT_ITEM, INPUT_PULLUP);
+  pinMode(NUT_OK, INPUT_PULLDOWN_16);
+  pinMode(NUT_METHOD, INPUT_PULLUP);
+  pinMode(NUT_CANCEL, INPUT_PULLUP);
+  pinMode(COI_PIN, OUTPUT);
+  digitalWrite(COI_PIN, LOW);
+  
+  attachInterrupt(digitalPinToInterrupt(NUT_CANCEL), ngatHuy, FALLING);
+
+  SPI.begin();
+  mfrc522.PCD_Init();
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0,0); lcd.print("DANG KET NOI...");
+  
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); }
+
+  mqtt.setServer(mqtt_server, mqtt_port);
+  
+  lcd.clear(); lcd.print("WIFI + MQTT OK!");
+  bip(2, 50); delay(1000);
+}
+
+void loop() {
+  if (!mqtt.connected()) reconnectMQTT();
+  mqtt.loop();
+
+  kiemTraQuetThe();
+
+  if (millis() - thoiGianCheckAPI >= CHU_KY_CHECK && trangThai != CHAO_KHACH) {
+    kiemTraTienVe();
+    thoiGianCheckAPI = millis();
+  }
+
+  if (coHuy) {
+    bip(1, 500);
+    trangThai = CHAO_KHACH;
+    coHuy = false;
+  }
+
+  switch (trangThai) {
+    case CHAO_KHACH:
+      lcd.clear(); lcd.setCursor(3, 0); lcd.print("XIN CHAO !!!"); 
+      chayChuVoTan("BAM CHON MON DE TIEP TUC...", 1, 200); 
+      break; 
+
+    case CHON_MON:
+      if (digitalRead(NUT_ITEM) == LOW) {
+        indexMon = (indexMon + 1) % 4;
+        hienThiMon(); bip(1, 50); delay(400);
+      }
+      if (digitalRead(NUT_OK) == HIGH) {
+        // KIỂM TRA HÀNG TRONG KHO
+        if (dsSoLuong[indexMon] <= 0) {
+           bip(1, 1000);
+           lcd.clear(); lcd.setCursor(0, 0); lcd.print("HET HANG !!!!");
+           lcd.setCursor(0, 1); lcd.print("XIN MOI CHON MON KHAC");
+           delay(2000);
+           hienThiMon();
+        } else {
+           trangThai = CHON_PTTT;
+           hienThiPTTT(); bip(2, 50); delay(400);
+        }
+      }
+      break;
+
+    case CHON_PTTT:
+      if (digitalRead(NUT_METHOD) == LOW) {
+        indexPTTT = (indexPTTT + 1) % 2;
+        hienThiPTTT(); bip(1, 50); delay(400);
+      }
+      if (digitalRead(NUT_OK) == HIGH) {
+        trangThai = DANG_THANH_TOAN;
+        hienThiThanhToan(); bip(2, 50); delay(400);
+      }
+      break;
+
+    case DANG_THANH_TOAN:
+      if (indexPTTT == 0) { 
+      } 
+      else { 
+        lcd.setCursor(0, 1); lcd.print("Cho Tien Vo...  ");
+        if (tongSoDu >= dsGia[indexMon]) {
+          tongSoDu -= dsGia[indexMon]; 
+          lcd.clear(); lcd.setCursor(4, 0); lcd.print("QUET QR");
+          lcd.setCursor(1, 1); lcd.print("THANH CONG !!!");
+          bip(2, 100); delay(2000);
+          
+          nhaHang(dsMon[indexMon]); 
+          trangThai = CHAO_KHACH;   
+        }
+      }
+      break;
+  }
+}
+
+void hienThiMon() {
+  lcd.clear(); lcd.setCursor(0, 0); lcd.print("CHON THUC UONG:");
+  lcd.setCursor(0, 1); 
+  if (dsSoLuong[indexMon] > 0) {
+    lcd.print("> " + dsMon[indexMon] + " " + String(dsGia[indexMon]/1000) + "k");
+  } else {
+    lcd.print("> " + dsMon[indexMon] + " (HET)");
+  }
+}
+
+void hienThiPTTT() {
+  lcd.clear(); lcd.setCursor(0, 0); lcd.print("CHON CACH TRA:");
+  lcd.setCursor(0, 1); lcd.print("> " + dsPTTT[indexPTTT]);
+}
+
+void hienThiThanhToan() {
+  lcd.clear();
+  if (indexPTTT == 0) {
+    lcd.print("MOI QUET THE...");
+    lcd.setCursor(0, 1); lcd.print("Gia: " + String(dsGia[indexMon]/1000) + "k");
+  } else {
+    lcd.print("MOI QUET MA QR");
+  }
+}
+
+void xulyNFC() {
+  String uid = "";
+  for (byte i = 0; i < mfrc522.uid.size; i++) {
+    uid += String(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+    uid += String(mfrc522.uid.uidByte[i], HEX);
+  }
+  uid.toUpperCase(); uid.trim();
+
+  bool timThay = false;
+  int soLuongThe = sizeof(danhSach) / sizeof(danhSach[0]);
+  
+  for (int i = 0; i < soLuongThe; i++) { 
+    if (uid == danhSach[i].uid) {
+      timThay = true;
+
+      if (danhSach[i].laNhanVien) {
+         lcd.clear(); lcd.setCursor(0, 0); lcd.print("CHAO " + danhSach[i].ten + "!");
+         bip(3, 100);
+         lcd.setCursor(0, 1); lcd.print("DANG MO TU...");
+         
+         giaoTiepESP2.println("MO_CUA");
+         
+         for(int j = 0; j < 4; j++) {
+           dsSoLuong[j] = 10;
+         }
+         
+         mqtt.publish("Thanh_toan", "STAFF_OPEN"); 
+         delay(2000);
+         trangThai = CHAO_KHACH; 
+         return;
+      }
+
+      if (trangThai == DANG_THANH_TOAN && indexPTTT == 0) {
+        lcd.clear(); lcd.setCursor(0, 0); lcd.print("CHAO " + danhSach[i].ten + "!");
+        if (danhSach[i].tienTk >= dsGia[indexMon]) {
+          danhSach[i].tienTk -= dsGia[indexMon]; 
+          lcd.setCursor(0, 1); lcd.print("DANG TRU TIEN...");
+          delay(1500); bip(2, 100);
+          
+          nhaHang(dsMon[indexMon]); 
+          trangThai = CHAO_KHACH; 
+        } else {
+          bip(1, 1000); lcd.clear(); lcd.setCursor(0, 0); lcd.print("LOI GIAO DICH!");
+          chayChu("TAI KHOAN KHONG DU TIEN !!", 1, 200);
+          delay(2000); hienThiThanhToan(); 
+        }
+      } 
+      break;
+    }
+  }
+
+  if (!timThay) {
+    if (trangThai == DANG_THANH_TOAN) {
+       lcd.clear(); lcd.setCursor(0, 0); lcd.print("KHONG TIM THAY !!");
+       bip(1, 1000); delay(2000); 
+       hienThiThanhToan(); 
+    }
+  }
+}
